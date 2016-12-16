@@ -12,18 +12,18 @@
   Use:
 import demo.demo_director as dd
 dd.clean_slate()
-dd.write_to_live()
-dd.host()
-dd.listen()
 
-    # Cleanup: (Note that this kills the metadata http hosting process, but does
-    #           not stop the XMLRPC-serving thread.)
-    demo_director.kill_server()
+  Cleanup: (Note that this kills the metadata http hosting process, but does
+            not stop the XMLRPC-serving thread.)
+demo_director.kill_server()
 
   Various attacks / manipulations can be performed before the server is killed.
   Some of these are discussed in uptane_test_instructions.py.
 
 """
+from __future__ import print_function
+from __future__ import unicode_literals
+from io import open
 
 import demo
 import uptane
@@ -31,7 +31,6 @@ import uptane.services.director as director
 import tuf.formats
 
 import threading # for the director services interface
-import xmlrpc.server # for the director services interface
 import os # For paths and symlink
 import shutil # For copying directory trees
 import sys, subprocess, time # For hosting
@@ -39,8 +38,13 @@ import tuf.repository_tool as rt
 import demo.demo_oem_repo as demo_oem_repo # for the main repo directory /:
 from uptane import GREEN, RED, YELLOW, ENDCOLORS
 
+from six.moves import xmlrpc_server # for the director services interface
+
+
+KNOWN_VINS = ['111', '112', '113']
+
 # Dynamic global objects
-repo = None
+#repo = None
 repo_server_process = None
 director_service_instance = None
 director_service_thread = None
@@ -51,17 +55,15 @@ def clean_slate(
   additional_root_key=False,
   additional_targets_key=False):
 
-  global repo
   global director_service_instance
 
 
-  # ----------------
-  # REPOSITORY SETUP:
-  # ----------------
+  director_dir = os.path.join(uptane.WORKING_DIR, 'director')
 
-  # Create repo at './repodirector'
-
-  repo = rt.create_new_repository(demo.DIRECTOR_REPO_NAME)
+  # Create a directory for the Director's files.
+  if os.path.exists(director_dir):
+    shutil.rmtree(director_dir)
+  os.makedirs(director_dir)
 
 
   # Create keys and/or load keys into memory.
@@ -71,10 +73,7 @@ def clean_slate(
     demo.generate_key('directortimestamp')
     demo.generate_key('directorsnapshot')
     demo.generate_key('director') # targets
-    if additional_root_key:
-      demo.generate_key('directorroot2')
-    if additional_targets_key:
-      demo.generate_key('director2')
+
 
   key_dirroot_pub = demo.import_public_key('directorroot')
   key_dirroot_pri = demo.import_private_key('directorroot')
@@ -84,78 +83,43 @@ def clean_slate(
   key_dirsnap_pri = demo.import_private_key('directorsnapshot')
   key_dirtarg_pub = demo.import_public_key('director')
   key_dirtarg_pri = demo.import_private_key('director')
-  key_dirroot2_pub = None
-  key_dirroot2_pri = None
-  if additional_root_key:
-    key_dirroot2_pub = demo.import_public_key('directorroot2')
-    key_dirroot2_pri = demo.import_private_key('directorroot2')
-  if additional_targets_key:
-    key_dirtarg2_pub = demo.import_public_key('director2')
-    key_dirtarg2_pri = demo.import_private_key('director2')
 
-
-  # Add top level keys to the main repository.
-
-  repo.root.add_verification_key(key_dirroot_pub)
-  repo.timestamp.add_verification_key(key_dirtime_pub)
-  repo.snapshot.add_verification_key(key_dirsnap_pub)
-  repo.targets.add_verification_key(key_dirtarg_pub)
-  repo.root.load_signing_key(key_dirroot_pri)
-  repo.timestamp.load_signing_key(key_dirtime_pri)
-  repo.snapshot.load_signing_key(key_dirsnap_pri)
-  repo.targets.load_signing_key(key_dirtarg_pri)
-  if additional_targets_key:
-    repo.targets.add_verification_key(key_dirtarg2_pub)
-    repo.targets.load_signing_key(key_dirtarg2_pri)
-  if additional_root_key:
-    repo.root.add_verification_key(key_dirroot2_pub)
-    repo.root.load_signing_key(key_dirroot2_pri)
-
-
-  # Add target to director.
-  # FOR NOW, we symlink the targets files on the director.
-  # In the future, we probably have to have the repository tools add a function
-  # like targets.add_target_from_metadata that doesn't require an actual target
-  # file to exist, but instead provides metadata on some hypothetical file that
-  # the director may not physically hold.
-  if os.path.exists(os.path.join(demo.DIRECTOR_REPO_TARGETS_DIR, 'infotainment_firmware.txt')):
-    os.remove(os.path.join(demo.DIRECTOR_REPO_TARGETS_DIR, 'infotainment_firmware.txt'))
-
-  os.symlink(os.path.join(demo.MAIN_REPO_TARGETS_DIR, 'infotainment_firmware.txt'),
-      os.path.join(demo.DIRECTOR_REPO_TARGETS_DIR, 'infotainment_firmware.txt'))
-
-  fobj = open(os.path.join(demo.DIRECTOR_REPO_TARGETS_DIR, 'additional_file.txt'), 'w')
-  fobj.write('Contents of additional_file.txt')
-  fobj.close()
-
-
-
-  # --------------
-  # SERVICES SETUP:
-  # --------------
 
   # Create the demo Director instance.
   director_service_instance = director.Director(
-      key_root=key_dirroot_pri,
-      key_timestamp=key_dirtime_pri,
-      key_snapshot=key_dirsnap_pri,
-      key_targets=key_dirtarg_pri,
-      ecu_public_keys=dict())
-
-  # Start with a hard-coded key for a single ECU for now.
-  test_ecu_public_key = demo.import_public_key('secondary')
-  test_ecu_serial = 'ecu11111'
-  director_service_instance.register_ecu_serial(
-      test_ecu_serial, test_ecu_public_key)
-
-
-
-  # Add a first target file, for use by Secondary ECU 22222
-  add_target_to_director(
-      os.path.join(demo.DIRECTOR_REPO_TARGETS_DIR, 'infotainment_firmware.txt'),
-      '22222')
+      director_repos_dir=director_dir,
+      key_root_pri=key_dirroot_pri,
+      key_root_pub=key_dirroot_pub,
+      key_timestamp_pri=key_dirtime_pri,
+      key_timestamp_pub=key_dirtime_pub,
+      key_snapshot_pri=key_dirsnap_pri,
+      key_snapshot_pub=key_dirsnap_pub,
+      key_targets_pri=key_dirtarg_pri,
+      key_targets_pub=key_dirtarg_pub,
+      ecu_public_keys=dict(),
+      ecus_by_vin={vin: [] for vin in KNOWN_VINS}) # dict mapping vin to [] for each vin in KNOWN_VINS
 
 
+
+  # You can tell the Director about ECUs this way:
+  # test_ecu_public_key = demo.import_public_key('secondary')
+  # test_ecu_serial = 'ecu11111'
+  # director_service_instance.register_ecu_serial(
+  #     test_ecu_serial, test_ecu_public_key, vin='111')
+
+
+
+  # Add a first target file, for use by every ECU in every vehicle in that the
+  # Director starts off with. (Currently 3)
+  # This copies the file to each repository's targets directory from the
+  # main repository.
+  for vin in director_service_instance.ecus_by_vin:
+    for ecu in director_service_instance.ecus_by_vin[vin]:
+      add_target_to_director(
+          os.path.join(demo.MAIN_REPO_TARGETS_DIR, 'infotainment_firmware.txt'),
+          'infotainment_firmware.txt',
+          vin,
+          ecu)
 
   write_to_live()
 
@@ -169,20 +133,43 @@ def clean_slate(
 
 def write_to_live():
 
-  global repo
+  global director_service_instance
 
-  # Write to director repo's metadata.staged.
-  repo.write()
+  # For each vehicle repository:
+  #   - write metadata.staged
+  #   - copy metadata.staged to the live metadata directory
+  for vin in director_service_instance.vehicle_repositories:
+    repo = director_service_instance.vehicle_repositories[vin]
+    repo_dir = repo._repository_directory
 
+    repo.write()
 
-  # Move staged metadata (from the write) to live metadata directory.
+    assert(os.path.exists(os.path.join(repo_dir, 'metadata.staged'))), \
+        'Programming error: a repository write just occurred; why is ' + \
+        'there no metadata.staged directory where it is expected?'
 
-  if os.path.exists(os.path.join(demo.DIRECTOR_REPO_DIR, 'metadata')):
-    shutil.rmtree(os.path.join(demo.DIRECTOR_REPO_DIR, 'metadata'))
+    # This shouldn't exist, but just in case something was interrupted,
+    # warn and remove it.
+    if os.path.exists(os.path.join(repo_dir, 'metadata.livetemp')):
+      print(YELLOW + 'Warning: metadata.livetemp existed already. '
+          'Some previous process was interrupted, or there is a programming '
+          'error.' + ENDCOLORS)
+      shutil.rmtree(os.path.join(repo_dir, 'metadata.livetemp'))
 
-  shutil.copytree(
-      os.path.join(demo.DIRECTOR_REPO_DIR, 'metadata.staged'),
-      os.path.join(demo.DIRECTOR_REPO_DIR, 'metadata'))
+    # Copy the staged metadata to a temp directory we'll move into place
+    # atomically in a moment.
+    shutil.copytree(
+        os.path.join(repo_dir, 'metadata.staged'),
+        os.path.join(repo_dir, 'metadata.livetemp'))
+
+    # Empty the existing (old) live metadata directory (relatively fast).
+    if os.path.exists(os.path.join(repo_dir, 'metadata')):
+      shutil.rmtree(os.path.join(repo_dir, 'metadata'))
+
+    # Atomically move the new metadata into place.
+    os.rename(
+        os.path.join(repo_dir, 'metadata.livetemp'),
+        os.path.join(repo_dir, 'metadata'))
 
   # TODO: <~> Call the encoders here to convert the metadata files into BER
   # versions and also host those!
@@ -191,37 +178,56 @@ def write_to_live():
 
 
 
-def add_target_to_director(target_fname, ecu_serial):
+def add_target_to_director(target_fname, filepath_in_repo, vin, ecu_serial):
   """
   For use in attacks and more specific demonstration.
 
-  Given a filename pointing to a file in the targets directory, adds that file
-  as a target file (calculating its cryptographic hash and length)
+  Given the filename of the file to add, the path relative to the repository
+  root to which to copy it, the VIN of the vehicle whose repository it should
+  be added to, and the ECU's serial directory, adds that file
+  as a target file (calculating its cryptographic hash and length) to the
+  appropriate repository for the given VIN.
 
   <Arguments>
     target_fname
       The full filename of the file to be added as a target to the Director's
-      targets role metadata. This file should be in the targets subdirectory of
-      the repository directory.
+      targets role metadata. This file doesn't have to be in any particular
+      place; it will be copied into the repository directory structure.
+
+    filepath_in_repo
+      The path relative to the root of the repository's targets directory
+      where this file will be kept and accessed by clients. (e.g. 'file1.txt'
+      or 'brakes/firmware.tar.gz')
 
     ecu_serial
       The ECU to assign this target to in the targets metadata.
       Complies with uptane.formats.ECU_SERIAL_SCHEMA
 
   """
-  global repo
+  global director_service_instance
 
-  tuf.formats.RELPATH_SCHEMA.check_match(target_fname)
+  uptane.formats.VIN_SCHEMA.check_match(vin)
   uptane.formats.ECU_SERIAL_SCHEMA.check_match(ecu_serial)
+  tuf.formats.RELPATH_SCHEMA.check_match(target_fname)
+  tuf.formats.RELPATH_SCHEMA.check_match(filepath_in_repo)
+
+  repo = director_service_instance.vehicle_repositories[vin]
+  repo_dir = repo._repository_directory
+
+  print('Copying target file into place.')
+  destination_filepath = os.path.join(repo_dir, 'targets', filepath_in_repo)
+
+  # TODO: This should probably place the file into a common targets directory
+  # that is then softlinked to all repositories.
+  shutil.copy(
+      target_fname,
+      destination_filepath)
 
   print('Adding target ' + repr(target_fname) + ' for ECU ' + repr(ecu_serial))
 
-  if ecu_serial not in director_service_instance.ecu_public_keys:
-    print(YELLOW + 'Warning: ECU ' + repr(ecu_serial) + ' is not a known ecu. '
-        'Adding target assignment in case the ECU is registered in the future, '
-        'but make sure the serial was correct.' + ENDCOLORS)
-
-  repo.targets.add_target(target_fname, custom={'ecu_serial': ecu_serial})
+  # This calls the appropriate vehicle repository.
+  director_service_instance.add_target_for_ecu(
+      vin, ecu_serial, destination_filepath)
 
 
 
@@ -282,7 +288,7 @@ def host():
 
 # Restrict director requests to a particular path.
 # Must specify RPC2 here for the XML-RPC interface to work.
-class RequestHandler(xmlrpc.server.SimpleXMLRPCRequestHandler):
+class RequestHandler(xmlrpc_server.SimpleXMLRPCRequestHandler):
   rpc_paths = ('/RPC2',)
 
 
@@ -304,7 +310,7 @@ def listen():
     return
 
   # Create server
-  server = xmlrpc.server.SimpleXMLRPCServer(
+  server = xmlrpc_server.SimpleXMLRPCServer(
       (demo.DIRECTOR_SERVER_HOST, demo.DIRECTOR_SERVER_PORT),
       requestHandler=RequestHandler, allow_none=True)
   #server.register_introspection_functions()
@@ -315,11 +321,11 @@ def listen():
       director_service_instance.register_vehicle_manifest,
       'submit_vehicle_manifest')
 
-  # In the longer term, this won't be exposed: it will only be reached via
-  # register_vehicle_manifest. For now, during development, however, this is
-  # exposed.
-  server.register_function(
-      director_service_instance.register_ecu_manifest, 'submit_ecu_manifest')
+  # # In the longer term, this won't be exposed: it will only be reached via
+  # # register_vehicle_manifest. For now, during development, however, this is
+  # # exposed.
+  # server.register_function(
+  #     director_service_instance.register_ecu_manifest, 'submit_ecu_manifest')
 
   server.register_function(
       director_service_instance.register_ecu_serial, 'register_ecu_serial')

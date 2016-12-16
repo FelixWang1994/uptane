@@ -8,7 +8,6 @@ Use:
 
 import demo.demo_secondary as ds
 ds.clean_slate() # Director and Primary should be listening first
-ds.listen()
 ds.generate_signed_ecu_manifest()   # saved as ds.most_recent_signed_manifest
 ds.submit_ecu_manifest_to_primary() # optionally takes different signed manifest
 
@@ -23,6 +22,9 @@ ds.submit_ecu_manifest_to_primary() # optionally takes different signed manifest
 
 
 """
+from __future__ import print_function
+from __future__ import unicode_literals
+from io import open
 
 import demo
 import uptane
@@ -35,25 +37,25 @@ import tuf.repository_tool as rt
 
 import os # For paths and makedirs
 import shutil # For copyfile
-import threading # for the demo listener
 import time
-import xmlrpc.client
-import xmlrpc.server
 import copy # for copying manifests before corrupting them during attacks
 import json # for customizing the Secondary's pinnings file.
+import canonicaljson
+
+from six.moves import xmlrpc_client
 
 # Globals
 CLIENT_DIRECTORY_PREFIX = 'temp_secondary' # name for this secondary's directory
 client_directory = None
 _vin = '111'
 _ecu_serial = '22222'
+_primary_host = demo.PRIMARY_SERVER_HOST
+_primary_port = demo.PRIMARY_SERVER_DEFAULT_PORT
 firmware_filename = 'secondary_firmware.txt'
 current_firmware_fileinfo = {}
 secondary_ecu = None
 ecu_key = None
 nonce = None
-
-listener_thread = None
 
 most_recent_signed_ecu_manifest = None
 
@@ -62,19 +64,28 @@ def clean_slate(
     use_new_keys=False,
     #client_directory_name=None,
     vin=_vin,
-    ecu_serial=_ecu_serial):
+    ecu_serial=_ecu_serial,
+    primary_host=None,
+    primary_port=None):
   """
   """
 
   global secondary_ecu
   global _vin
   global _ecu_serial
+  global _primary_host
+  global _primary_port
   global nonce
-  global listener_thread
   global client_directory
 
   _vin = vin
   _ecu_serial = ecu_serial
+
+  if primary_host is not None:
+    _primary_host = primary_host
+
+  if primary_port is not None:
+    _primary_port = primary_port
 
   client_directory = os.path.join(
       uptane.WORKING_DIR, CLIENT_DIRECTORY_PREFIX + demo.get_random_string(5))
@@ -104,54 +115,15 @@ def clean_slate(
 
   # Create directory structure for the client and copy the root files from the
   # repositories.
-
-  CLIENT_METADATA_DIR_MAINREPO_CURRENT = os.path.join(client_directory, 'metadata', 'mainrepo', 'current')
-  CLIENT_METADATA_DIR_MAINREPO_PREVIOUS = os.path.join(client_directory, 'metadata', 'mainrepo', 'previous')
-  CLIENT_METADATA_DIR_DIRECTOR_CURRENT = os.path.join(client_directory, 'metadata', 'director', 'current')
-  CLIENT_METADATA_DIR_DIRECTOR_PREVIOUS = os.path.join(client_directory, 'metadata', 'director', 'previous')
-
-  # Note that the hosts and ports for the repositories are drawn from
-  # pinned.json now. The services (timeserver and the director's
-  # submit-manifest service) are still addressed here, though, currently
-  # by pulling the constants from their modules directly
-  # e.g. timeserver.TIMESERVER_PORT and director.DIRECTOR_SERVER_PORT).
-  # Note that despite the vague name, the latter is not the director
-  # repository, but a service that receives manifests.
-
-
-  # Set up the TUF client directories for the two repositories.
-  if os.path.exists(client_directory):
-    shutil.rmtree(client_directory)
-
-  for d in [
-      CLIENT_METADATA_DIR_MAINREPO_CURRENT,
-      CLIENT_METADATA_DIR_MAINREPO_PREVIOUS,
-      CLIENT_METADATA_DIR_DIRECTOR_CURRENT,
-      CLIENT_METADATA_DIR_DIRECTOR_PREVIOUS]:
-    os.makedirs(d)
-
-  # Get the root.json file from the mainrepo (would come with this client).
-  shutil.copyfile(
-      demo.MAIN_REPO_ROOT_FNAME,
-      os.path.join(CLIENT_METADATA_DIR_MAINREPO_CURRENT, 'root.json'))
-
-  # Get the root.json file from the director repo (would come with this client).
-  shutil.copyfile(
-      demo.DIRECTOR_REPO_ROOT_FNAME,
-      os.path.join(CLIENT_METADATA_DIR_DIRECTOR_CURRENT, 'root.json'))
-
-  # Add a pinned.json to this client (softlink it from a saved copy).
-  os.symlink(
-      create_secondary_pinning_file(),
-      os.path.join(client_directory, 'metadata', 'pinned.json'))
+  uptane.common.create_directory_structure_for_client(
+      client_directory, create_secondary_pinning_file(),
+      {demo.MAIN_REPO_NAME: demo.MAIN_REPO_ROOT_FNAME,
+      demo.DIRECTOR_REPO_NAME: os.path.join(demo.DIRECTOR_REPO_DIR, vin,
+      'metadata', 'root.json')})
 
   # Configure tuf with the client's metadata directories (where it stores the
   # metadata it has collected from each repository, in subdirectories).
   tuf.conf.repository_directory = client_directory # This setting should probably be called client_directory instead, post-TAP4.
-
-
-
-
 
 
 
@@ -172,13 +144,13 @@ def clean_slate(
 
   try:
     register_self_with_director()
-  except xmlrpc.client.Fault:
+  except xmlrpc_client.Fault:
     print('Registration with Director failed. Now assuming this Secondary is '
         'already registered.')
 
   try:
     register_self_with_primary()
-  except xmlrpc.client.Fault:
+  except xmlrpc_client.Fault:
     print('Registration with Primary failed. Now assuming this Secondary is '
         'already registered.')
 
@@ -205,10 +177,11 @@ def create_secondary_pinning_file():
   Returns the filename of the created file.
   """
 
-  pinnings = json.load(open(demo.DEMO_SECONDARY_PINNING_FNAME, 'r'))
+  pinnings = json.load(
+      open(demo.DEMO_SECONDARY_PINNING_FNAME, 'r', encoding='utf-8'))
 
   fname_to_create = os.path.join(
-      demo.DEMO_DIR, 'pinned.json_' + demo.get_random_string(5))
+      demo.DEMO_DIR, 'pinned.json_secondary_' + demo.get_random_string(5))
 
   for repo_name in pinnings['repositories']:
 
@@ -220,57 +193,10 @@ def create_secondary_pinning_file():
 
     pinnings['repositories'][repo_name]['mirrors'][0] = mirror
 
-
-  with open(fname_to_create, 'w') as fobj:
-    json.dump(pinnings, fobj)
+  with open(fname_to_create, 'wb') as fobj:
+    fobj.write(canonicaljson.encode_canonical_json(pinnings))
 
   return fname_to_create
-
-
-
-
-
-
-# Restrict director requests to a particular path.
-# Must specify RPC2 here for the XML-RPC interface to work.
-class RequestHandler(xmlrpc.server.SimpleXMLRPCRequestHandler):
-  rpc_paths = ('/RPC2',)
-
-
-
-def listen():
-  """
-  Listens on SECONDARY_SERVER_PORT for xml-rpc calls to functions
-
-  NOTE: At the time of this writing, Secondaries in the demo don't need to
-  listen for asynchronous messages from Primaries, as Secondaries do the
-  pulling and pushing themselves whenever they will.
-  """
-
-  global listener_thread
-
-  # Create server
-  server = xmlrpc.server.SimpleXMLRPCServer(
-      (demo.SECONDARY_SERVER_HOST, demo.SECONDARY_SERVER_PORT),
-      requestHandler=RequestHandler, allow_none=True)
-  #server.register_introspection_functions()
-
-  # Register function that can be called via XML-RPC, allowing a Primary to
-  # send metadata and images to the Secondary.
-  server.register_function(
-      secondary_ecu.receive_msg_from_primary, 'receive_msg_from_primary')
-
-  print(' Secondary will now listen on port ' + str(demo.SECONDARY_SERVER_PORT))
-
-  if listener_thread is not None:
-    print('Sorry - there is already a Secondary thread listening.')
-    return
-  else:
-    print(' Starting Secondary Listener Thread: will now listen on port ' +
-        str(demo.SECONDARY_SERVER_PORT))
-    listener_thread = threading.Thread(target=server.serve_forever)
-    listener_thread.setDaemon(True)
-    listener_thread.start()
 
 
 
@@ -289,9 +215,8 @@ def submit_ecu_manifest_to_primary(signed_ecu_manifest=None):
   # version of the ecu_manifest after encoders have been implemented.
 
 
-  server = xmlrpc.client.ServerProxy(
-      'http://' + str(demo.PRIMARY_SERVER_HOST) + ':' +
-      str(demo.PRIMARY_SERVER_PORT))
+  server = xmlrpc_client.ServerProxy(
+      'http://' + str(_primary_host) + ':' + str(_primary_port))
   #if not server.system.listMethods():
   #  raise Exception('Unable to connect to server.')
 
@@ -337,9 +262,8 @@ def update_cycle():
   global current_firmware_fileinfo
 
   # Connect to the Primary
-  pserver = xmlrpc.client.ServerProxy(
-    'http://' + str(demo.PRIMARY_SERVER_HOST) + ':' +
-    str(demo.PRIMARY_SERVER_PORT))
+  pserver = xmlrpc_client.ServerProxy(
+    'http://' + str(_primary_host) + ':' + str(_primary_port))
 
   # Download the time attestation from the Primary.
   time_attestation = pserver.get_last_timeserver_attestation()
@@ -353,35 +277,16 @@ def update_cycle():
   try:
     secondary_ecu.validate_time_attestation(time_attestation)
   except uptane.BadTimeAttestation as e:
-    print(RED + "Timeserver attestation from Primary did not check out! This "
-        "Secondary's nonce was not found. Not updating this Secondary's time." +
-        ENDCOLORS)
+    print(YELLOW + "Timeserver attestation from Primary does not check out: "
+        "This Secondary's nonce was not found. Not updating this Secondary's "
+        "time this cycle." + ENDCOLORS)
   except tuf.BadSignatureError as e:
-    print(RED + "Timeserver attestation from Primary did not check out! Bad "
+    print(RED + "Timeserver attestation from Primary did not check out. Bad "
         "signature. Not updating this Secondary's time." + ENDCOLORS)
   #else:
   #  print(GREEN + 'Official time has been updated successfully.' + ENDCOLORS)
 
-
-  # Not doing this anymore:
-  # # Write the metadata to files to use as a local TUF repository.
-  # # We'll use a directory in the client's directory, "unverified", with
-  # # subdirectories for each repository:
-  # #  client_directory/unverified/<reponame>/metadata
-  # # This function will do some minimal checks to make sure that the Primary
-  # # hasn't sent us a "repository name" that results in us writing files to
-  # # inappropriate places in our filesystem.
-  # # We'll use a directory in the client's directory, "unverified", with
-  # # subdirectories for each repository:
-  # #  client_directory/unverified/<reponame>/metadata
-  # # This has to match the pinned.json this Secondary client uses, which is
-  # # created from template demo/pinned_secondary_template.json by call
-  # # create_secondary_pinning_file above.
-  # write_multirepo_tuf_metadata_to_files(
-  #     metadata=metadata,
-  #     metadata_directory=os.path.join(client_directory, 'unverified'))
-
-  # Instead, dump the archive file to disk.
+  # Dump the archive file to disk.
   archive_fname = os.path.join(
       secondary_ecu.full_client_dir, 'metadata_archive.zip')
 
@@ -505,65 +410,6 @@ def update_cycle():
 
 
 
-# No longer doing this:
-# def write_multirepo_tuf_metadata_to_files(metadata, metadata_directory):
-#   """
-#   Writes TUF metadata from several repositories into a directory to serve as
-#   a set of local repositories for metadata.
-
-#   Since the repository name provided may not be trustworthy from the Primary, we make sure it doesn't
-#   contain slashes, say, and try to get us to create files somewhere bizarre.
-
-
-#   <Arguments>
-
-#     metadata
-#       Metadata from any number of repsitories, in a dictionary indexed by
-#       repository name, with each value being a dict of metadata of the form that
-#       is returned by tuf.updater.Updater.get_metadata.
-#       Example:
-#         {
-#           'repo1':
-#             'root': {'_type': 'Root',
-#               'compression_algorithms': ['gz'],
-#               'consistent_snapshot': False,
-#               ...
-#             'targets': {'_type': 'Targets',
-#               'delegations': {'keys': {}, 'roles': []},
-#               'expires': '2017-02-15T02:55:05Z',
-#               ...
-#             ...
-#           'repo2':
-#             'root': {...},
-#             ...
-#         }
-
-#     metadata_directory
-#       The directory into which we will put the metadata, with subdirectories
-#       for each repository:
-#         <metadata_directory>/<repo_name>/metadata
-
-#   """
-#   for repo_name in metadata:
-
-#     safer_repo_metadata_directory = enforce_jail(
-#         os.path.join(metadata_directory, repo_name, 'metadata'),
-#         client_directory)
-
-#     os.makedirs(safer_repo_metadata_directory)
-
-#     # TODO: Mind this. This will have to change if the structure of TUF
-#     # repositories changes (as it probably has in a branch we have to merge
-#     # shortly for TAP 5 that might put delegated roles in a different
-#     # directory).
-#     for role_name in metadata[repo_name]:
-
-#       safer_role_fname = enforce_jail(
-#           os.path.join(safer_repo_metadata_directory, role_name + '.json'),
-#           safer_repo_metadata_directory)
-
-#       json.dump(metadata[repo_name][role_name], open(safer_role_fname, 'w'))
-
 
 
 def generate_signed_ecu_manifest():
@@ -595,11 +441,9 @@ def ATTACK_send_corrupt_manifest_to_primary():
   print('   The attacks_detected field now reads "' + RED +
       repr(corrupt_signed_manifest['signed']['attacks_detected']) + ENDCOLORS)
 
-  import xmlrpc.client # for xmlrpc.client.Fault
-
   try:
     submit_ecu_manifest_to_primary(corrupt_signed_manifest)
-  except xmlrpc.client.Fault:
+  except xmlrpc_client.Fault:
     print(GREEN + 'Primary REJECTED the fraudulent ECU manifest.' + ENDCOLORS)
   else:
     print(RED + 'Primary ACCEPTED the fraudulent ECU manifest!' + ENDCOLORS)
@@ -639,11 +483,9 @@ def ATTACK_send_manifest_with_wrong_sig_to_primary():
   uptane.formats.SIGNABLE_ECU_VERSION_MANIFEST_SCHEMA.check_match(
       signed_corrupt_manifest)
 
-  #import xmlrpc.client # for xmlrpc.client.Fault
-
   try:
     submit_ecu_manifest_to_primary(signed_corrupt_manifest)
-  except xmlrpc.client.Fault as e:
+  except xmlrpc_client.Fault as e:
     print('Primary REJECTED the fraudulent ECU manifest.')
   else:
     print('Primary ACCEPTED the fraudulent ECU manifest!')
@@ -664,12 +506,14 @@ def register_self_with_director():
   themselves.
   """
   # Connect to the Director
-  server = xmlrpc.client.ServerProxy(
+  server = xmlrpc_client.ServerProxy(
     'http://' + str(demo.DIRECTOR_SERVER_HOST) + ':' +
     str(demo.DIRECTOR_SERVER_PORT))
 
   print('Registering Secondary ECU Serial and Key with Director.')
-  server.register_ecu_serial(secondary_ecu.ecu_serial, secondary_ecu.ecu_key)
+  server.register_ecu_serial(
+      secondary_ecu.ecu_serial,
+      uptane.common.public_key_from_canonical(secondary_ecu.ecu_key), _vin)
   print(GREEN + 'Secondary has been registered with the Director.' + ENDCOLORS)
 
 
@@ -683,9 +527,8 @@ def register_self_with_primary():
   into the vehicle during assembly, not by the Secondary itself.
   """
   # Connect to the Primary
-  server = xmlrpc.client.ServerProxy(
-    'http://' + str(demo.PRIMARY_SERVER_HOST) + ':' +
-    str(demo.PRIMARY_SERVER_PORT))
+  server = xmlrpc_client.ServerProxy(
+    'http://' + str(_primary_host) + ':' + str(_primary_port))
 
   print('Registering Secondary ECU Serial and Key with Primary.')
   server.register_new_secondary(secondary_ecu.ecu_serial)

@@ -9,6 +9,7 @@
   Repo be running.
 
 """
+from __future__ import unicode_literals
 
 import uptane
 import uptane.formats
@@ -134,9 +135,6 @@ class TestPrimary(unittest.TestCase):
     """
 
     global primary_instance
-
-
-    client_directory_name = 'test_primary_client'
 
 
     # Set up a client directory first.

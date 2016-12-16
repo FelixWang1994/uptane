@@ -2,11 +2,15 @@
 Some common utilities for Uptane, to be assigned to more sensible locations in
 the future.
 """
+from __future__ import print_function
+from __future__ import unicode_literals
+
 import tuf
 import tuf.formats
 import json
 import os
 import shutil
+import copy
 
 SUPPORTED_KEY_TYPES = ['ed25519', 'rsa']
 
@@ -79,22 +83,46 @@ def sign_signable(signable, keys_to_sign_with):
 
 def canonical_key_from_pub_and_pri(key_pub, key_pri):
   """
-  Turn this into a canonical key matching tuf.formats.ANYKEY_SCHEMA
-  Note: it looks like the resulting object is the same as the private key
-  anyway, at least with ed25519. Is it always?
+  Turn this into a canonical key matching tuf.formats.ANYKEY_SCHEMA, with
+  the optional element keyid_hash_algorithms, which can be found in the
+  public key, and containing both public and private key values.
 
-  TODO: <~> Find out if this is necessary. If not, instead, replace calls to
-  this with use of private key, but don't forget to STILL call check_match.
+  It is assumed that the following elements of each of the two arguments is a
+  string:
+    key['keytype']
+    key['keyid']
+    key['keyval']['public']
+    key['keyval']['private']  (for key_pri)
   """
   key = {
       'keytype': key_pub['keytype'],
       'keyid': key_pub['keyid'],
       'keyval': {
         'public': key_pub['keyval']['public'],
-        'private': key_pri['keyval']['private']}}
+        'private': key_pri['keyval']['private']},
+      'keyid_hash_algorithms': copy.deepcopy(key_pub['keyid_hash_algorithms'])}
   tuf.formats.ANYKEY_SCHEMA.check_match(key)
 
   return key
+
+
+
+
+
+def public_key_from_canonical(key_canonical):
+  """
+  Given a key that includes all public and private key information, return a
+  public key (assumed to be the canonical key with the 'private' component
+  of the 'keyval' dictionary stripped).
+  """
+  tuf.formats.ANYKEY_SCHEMA.check_match(key_canonical)
+
+  key_public = copy.deepcopy(key_canonical)
+
+  del key_public['keyval']['private']
+
+  return key_public
+
 
 
 

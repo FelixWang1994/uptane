@@ -17,6 +17,9 @@ dp.submit_vehicle_manifest_to_director()
 
 
 """
+from __future__ import print_function
+from __future__ import unicode_literals
+from io import open
 
 import demo
 import uptane
@@ -26,14 +29,18 @@ from uptane import GREEN, RED, YELLOW, ENDCOLORS
 import tuf.keys
 import tuf.repository_tool as rt
 import tuf.client.updater
+import json
+import canonicaljson
 
 import os # For paths and makedirs
 import shutil # For copyfile
 import threading # for the demo listener
 import time
-import xmlrpc.client
-import xmlrpc.server
-import six
+
+from six.moves import xmlrpc_client
+from six.moves import xmlrpc_server
+from six.moves import range
+import socket # for socket.error, to catch listening failures from six's xmlrpc server
 
 # Import a CAN communications module for partial-verification Secondaries
 import ctypes
@@ -45,7 +52,9 @@ LIBUPTANE_LIBRARY_FNAME = os.path.join(
 
 
 # Globals
-_client_directory_name = 'temp_primary' # name for this Primary's directory
+CLIENT_DIRECTORY_PREFIX = 'temp_primary'
+client_directory = None
+#_client_directory_name = 'temp_primary' # name for this Primary's directory
 _vin = '111'
 _ecu_serial = '11111'
 # firmware_filename = 'infotainment_firmware.txt'
@@ -78,7 +87,7 @@ most_recent_signed_vehicle_manifest = None
 
 def clean_slate(
     use_new_keys=False,
-    client_directory_name=_client_directory_name,
+    # client_directory_name=None,
     vin=_vin,
     ecu_serial=_ecu_serial,
     c_interface=False):
@@ -86,17 +95,21 @@ def clean_slate(
   """
 
   global primary_ecu
-  global _client_directory_name
+  global client_directory
   global _vin
   global _ecu_serial
   global listener_thread
   global use_can_interface
 
-  _client_directory_name = client_directory_name
   _vin = vin
   _ecu_serial = ecu_serial
   use_can_interface = c_interface
 
+  # if client_directory_name is not None:
+  #   client_directory = client_directory_name
+  # else:
+  client_directory = os.path.join(
+      uptane.WORKING_DIR, CLIENT_DIRECTORY_PREFIX + demo.get_random_string(5))
 
   # Load the public timeserver key.
   key_timeserver_pub = demo.import_public_key('timeserver')
@@ -114,32 +127,24 @@ def clean_slate(
   # creation of repository metadata directories, current and previous, putting
   # the pinning.json file in place, etc.
   uptane.common.create_directory_structure_for_client(
-      _client_directory_name, demo.DEMO_PINNING_FNAME,
+      client_directory, create_primary_pinning_file(),
       {demo.MAIN_REPO_NAME: demo.MAIN_REPO_ROOT_FNAME,
-      demo.DIRECTOR_REPO_NAME: demo.DIRECTOR_REPO_ROOT_FNAME})
+      demo.DIRECTOR_REPO_NAME: os.path.join(demo.DIRECTOR_REPO_DIR, vin,
+      'metadata', 'root.json')})
 
   # Configure tuf with the client's metadata directories (where it stores the
   # metadata it has collected from each repository, in subdirectories).
-  tuf.conf.repository_directory = _client_directory_name
-
-
-
-
-
-
+  tuf.conf.repository_directory = client_directory
 
 
 
   # Initialize a Primary ECU, making a client directory and copying the root
   # file from the repositories.
   primary_ecu = primary.Primary(
-      full_client_dir=os.path.join(uptane.WORKING_DIR, _client_directory_name),
-      # pinning_filename=demo.DEMO_PINNING_FNAME,
+      full_client_dir=os.path.join(uptane.WORKING_DIR, client_directory),
       director_repo_name=demo.DIRECTOR_REPO_NAME,
       vin=_vin,
       ecu_serial=_ecu_serial,
-      # fname_root_from_mainrepo=demo.MAIN_REPO_ROOT_FNAME,
-      # fname_root_from_directorrepo=demo.DIRECTOR_REPO_ROOT_FNAME,
       primary_key=ecu_key,
       time=clock,
       timeserver_public_key=key_timeserver_pub)
@@ -155,7 +160,7 @@ def clean_slate(
 
   try:
     register_self_with_director()
-  except xmlrpc.client.Fault:
+  except xmlrpc_client.Fault:
     print('Registration with Director failed. Now assuming this Primary is '
         'already registered.')
 
@@ -185,6 +190,38 @@ def clean_slate(
 
   generate_signed_vehicle_manifest()
   submit_vehicle_manifest_to_director()
+
+
+
+
+
+def create_primary_pinning_file():
+  """
+  Load the template pinned.json file and save a filled in version that, for the
+  Director repository, points to a subdirectory intended for this specific
+  vehicle.
+
+  Returns the filename of the created file.
+  """
+
+  pinnings = json.load(
+      open(demo.DEMO_PRIMARY_PINNING_FNAME, 'r', encoding='utf-8'))
+
+  fname_to_create = os.path.join(
+      demo.DEMO_DIR, 'pinned.json_primary_' + demo.get_random_string(5))
+
+  assert 1 == len(pinnings['repositories'][demo.DIRECTOR_REPO_NAME]['mirrors']), 'Config error.'
+
+  mirror = pinnings['repositories'][demo.DIRECTOR_REPO_NAME]['mirrors'][0]
+  mirror = mirror.replace('<VIN>', _vin)
+
+  pinnings['repositories'][demo.DIRECTOR_REPO_NAME]['mirrors'][0] = mirror
+
+
+  with open(fname_to_create, 'wb') as fobj:
+    fobj.write(canonicaljson.encode_canonical_json(pinnings))
+
+  return fname_to_create
 
 
 
@@ -239,7 +276,7 @@ def update_cycle():
   # nonces as "sent" and empties the Primary's list of nonces to send.)
   nonces_to_send = primary_ecu.get_nonces_to_send_and_rotate()
 
-  tserver = xmlrpc.client.ServerProxy(
+  tserver = xmlrpc_client.ServerProxy(
       'http://' + str(demo.TIMESERVER_HOST) + ':' + str(demo.TIMESERVER_PORT))
   #if not server.system.listMethods():
   #  raise Exception('Unable to connect to server.')
@@ -329,7 +366,7 @@ def submit_vehicle_manifest_to_director(signed_vehicle_manifest=None):
   # version of the ecu_manifest after encoders have been implemented.
 
 
-  server = xmlrpc.client.ServerProxy(
+  server = xmlrpc_client.ServerProxy(
       'http://' + str(demo.DIRECTOR_SERVER_HOST) + ':' +
       str(demo.DIRECTOR_SERVER_PORT))
   #if not server.system.listMethods():
@@ -354,12 +391,13 @@ def register_self_with_director():
   Send the Director a message to register our ECU serial number and Public Key.
   """
   # Connect to the Director
-  server = xmlrpc.client.ServerProxy(
+  server = xmlrpc_client.ServerProxy(
     'http://' + str(demo.DIRECTOR_SERVER_HOST) + ':' +
     str(demo.DIRECTOR_SERVER_PORT))
 
   print('Registering Primary ECU Serial and Key with Director.')
-  server.register_ecu_serial(primary_ecu.ecu_serial, primary_ecu.primary_key)
+  server.register_ecu_serial(
+      primary_ecu.ecu_serial, primary_ecu.primary_key, _vin)
   print(GREEN + 'Primary has been registered with the Director.' + ENDCOLORS)
 
 
@@ -390,11 +428,11 @@ def register_self_with_director():
 #   print('   Modified the signed manifest as a MITM, simply changing a value:')
 #   print('   The attacks_detected field now reads ' + RED + '"Everything is great, I PROMISE!' + ENDCOLORS)
 
-#   #import xmlrpc.client # for xmlrpc.client.Fault
+#   #import xmlrpc_client # for xmlrpc_client.Fault
 
 #   try:
 #     primary_ecu.submit_ecu_manifest_to_director(corrupt_signed_manifest)
-#   except xmlrpc.client.Fault:
+#   except xmlrpc_client.Fault:
 #     print(GREEN + 'Director service REJECTED the fraudulent ECU manifest.' + ENDCOLORS)
 #   else:
 #     print(RED + 'Director service ACCEPTED the fraudulent ECU manifest!' + ENDCOLORS)
@@ -432,11 +470,11 @@ def register_self_with_director():
 #   uptane.formats.SIGNABLE_ECU_VERSION_MANIFEST_SCHEMA.check_match(
 #       signed_corrupt_manifest)
 
-#   #import xmlrpc.client # for xmlrpc.client.Fault
+#   #import xmlrpc_client # for xmlrpc_client.Fault
 
 #   try:
 #     primary_ecu.submit_ecu_manifest_to_director(signed_corrupt_manifest)
-#   except xmlrpc.client.Fault as e:
+#   except xmlrpc_client.Fault as e:
 #     print('Director service REJECTED the fraudulent ECU manifest.')
 #   else:
 #     print('Director service ACCEPTED the fraudulent ECU manifest!')
@@ -532,7 +570,7 @@ def get_image_for_ecu(ecu_serial):
 
     assert os.path.exists(image_fname), 'File ' + repr(image_fname) + \
         ' does not exist....'
-    binary_data = xmlrpc.client.Binary(open(image_fname, 'rb').read())
+    binary_data = xmlrpc_client.Binary(open(image_fname, 'rb').read())
 
     print('Distributing image to ECU ' + repr(ecu_serial))
 
@@ -606,7 +644,7 @@ def get_metadata_for_ecu(ecu_serial, force_partial_verification=False):
 
     print('Distributing metadata to ECU ' + repr(ecu_serial))
 
-    binary_data = xmlrpc.client.Binary(open(fname, 'rb').read())
+    binary_data = xmlrpc_client.Binary(open(fname, 'rb').read())
 
     print('Distributing image to ECU ' + repr(ecu_serial))
     return binary_data
@@ -703,7 +741,7 @@ def get_time_attestation_for_ecu(ecu_serial):
 
 # Restrict Primary requests to a particular path.
 # Must specify RPC2 here for the XML-RPC interface to work.
-class RequestHandler(xmlrpc.server.SimpleXMLRPCRequestHandler):
+class RequestHandler(xmlrpc_server.SimpleXMLRPCRequestHandler):
   rpc_paths = ('/RPC2',)
 
 
@@ -712,13 +750,32 @@ class RequestHandler(xmlrpc.server.SimpleXMLRPCRequestHandler):
 
 def listen():
   """
-  Listens on PRIMARY_SERVER_PORT for xml-rpc calls to functions
+  Listens on an available port from list PRIMARY_SERVER_AVAILABLE_PORTS, for
+  XML-RPC calls from demo Secondaries for Primary interface calls.
   """
 
   # Create server
-  server = xmlrpc.server.SimpleXMLRPCServer(
-      (demo.PRIMARY_SERVER_HOST, demo.PRIMARY_SERVER_PORT),
-      requestHandler=RequestHandler, allow_none=True)
+  server = None
+  successful_port = None
+  last_error = None
+  for port in demo.PRIMARY_SERVER_AVAILABLE_PORTS:
+    try:
+      server = xmlrpc_server.SimpleXMLRPCServer(
+          (demo.PRIMARY_SERVER_HOST, port),
+          requestHandler=RequestHandler, allow_none=True)
+    except socket.error as e:
+      print('Failed to bind Primary XMLRPC Listener to port ' + repr(port) +
+          '. Trying next port.')
+      last_error = e
+
+    else:
+      successful_port = port
+      break
+
+  if server is None: # All ports failed.
+    assert last_error is not None, 'Programming error'
+    raise last_error
+
   #server.register_introspection_functions()
 
   # Register functions that can be called via XML-RPC, allowing Secondaries to
@@ -742,6 +799,6 @@ def listen():
       primary_ecu.update_exists_for_ecu, 'update_exists_for_ecu')
 
 
-  print('Primary will now listen on port ' + str(demo.PRIMARY_SERVER_PORT))
+  print('Primary will now listen on port ' + str(successful_port))
   server.serve_forever()
 
