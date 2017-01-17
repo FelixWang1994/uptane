@@ -26,6 +26,7 @@ import uptane
 import uptane.common # for canonical key construction and signing
 import uptane.clients.primary as primary
 from uptane import GREEN, RED, YELLOW, ENDCOLORS
+from demo.uptane_banners import *
 import tuf.keys
 import tuf.repository_tool as rt
 import tuf.client.updater
@@ -126,11 +127,16 @@ def clean_slate(
   # Craft the directory structure for the client directory, including the
   # creation of repository metadata directories, current and previous, putting
   # the pinning.json file in place, etc.
-  uptane.common.create_directory_structure_for_client(
-      client_directory, create_primary_pinning_file(),
-      {demo.MAIN_REPO_NAME: demo.MAIN_REPO_ROOT_FNAME,
-      demo.DIRECTOR_REPO_NAME: os.path.join(demo.DIRECTOR_REPO_DIR, vin,
-      'metadata', 'root.json')})
+  try:
+    uptane.common.create_directory_structure_for_client(
+        client_directory, create_primary_pinning_file(),
+        {demo.MAIN_REPO_NAME: demo.MAIN_REPO_ROOT_FNAME,
+        demo.DIRECTOR_REPO_NAME: os.path.join(demo.DIRECTOR_REPO_DIR, vin,
+        'metadata', 'root.json')})
+  except FileNotFoundError:
+    raise Exception(RED + 'Unable to create Primary client directory '
+        'structure. Does the Director Repo for the vehicle exist yet?' +
+        ENDCOLORS)
 
   # Configure tuf with the client's metadata directories (where it stores the
   # metadata it has collected from each repository, in subdirectories).
@@ -294,13 +300,13 @@ def update_cycle():
 
 
 
-  #
-  # SECOND: VEHICLE VERSION MANIFEST
-  #
+  # #
+  # # SECOND: VEHICLE VERSION MANIFEST
+  # #
 
-  # Generate and send.
-  vehicle_manifest = generate_signed_vehicle_manifest()
-  submit_vehicle_manifest_to_director(vehicle_manifest)
+  # # Generate and send.
+  # vehicle_manifest = generate_signed_vehicle_manifest()
+  # submit_vehicle_manifest_to_director(vehicle_manifest)
 
 
 
@@ -732,7 +738,7 @@ def get_time_attestation_for_ecu(ecu_serial):
         repr(ecu_serial) + ') does not appear in the mapping of ECU Serials '
         'to CAN IDs. Sending time attestation back.')
 
-    print('Distributing metadata to ECU ' + repr(ecu_serial))
+    print('Distributing time attestation to ECU ' + repr(ecu_serial))
     return attestation
 
 
@@ -802,3 +808,18 @@ def listen():
   print('Primary will now listen on port ' + str(successful_port))
   server.serve_forever()
 
+
+
+
+def try_banners():
+  preview_all_banners()
+
+
+
+def looping_update():
+  while True:
+    try:
+      update_cycle()
+    except Exception as e:
+      print(repr(e))
+    time.sleep(2)

@@ -19,13 +19,13 @@
 
     - Registration of new ECUs, given serial and public key
 
-    - Validation of Vehicle manifests, supporting BER
+    - Validation of Vehicle manifests
 
-    - Validation of ECU manifests, supporting BER
+    - Validation of ECU manifests
 
-    - Writing of BER-encoded signed targets metadata for a given vehicle, given
-      as input a map of ecu serials to target info (or filenames from which to
-      extract target info), including BER encoding
+    - Writing of signed targets metadata for a given vehicle, given as input
+      a map of ecu serials to target info (or filenames from which to extract
+      target info)
 
 """
 from __future__ import unicode_literals
@@ -352,7 +352,7 @@ class Director:
     if not valid:
       log.debug(
           'Rejecting a vehicle manifest because the Primary signature on it is '
-          'not valid.It must be correctly signed by the expected Primary ECU '
+          'not valid. It must be correctly signed by the expected Primary ECU '
           'key.')
       # Raise a fault for the offending ECU's XMLRPC request.
       raise tuf.BadSignatureError('Sender supplied an invalid signature. '
@@ -488,9 +488,11 @@ class Director:
       raise uptane.UnknownVehicle('The VIN provided, ' + repr(vin) + ' is not '
           'that of a vehicle known to this Director.')
 
-    elif ecu_serial not in inventory.ecu_public_keys:
-      raise uptane.UnknownECU('The ECU Serial provided, ' + repr(ecu_serial) +
-          ' is not that of an ECU known to this Director.')
+    # With the below off, we will save targets for ECUs we didn't previously
+    # know exist.
+    # elif ecu_serial not in inventory.ecu_public_keys:
+    #   raise uptane.UnknownECU('The ECU Serial provided, ' + repr(ecu_serial) +
+    #       ' is not that of an ECU known to this Director.')
 
     self.vehicle_repositories[vin].targets.add_target(
         target_filepath, custom={'ecu_serial': ecu_serial})

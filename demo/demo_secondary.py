@@ -31,6 +31,7 @@ import uptane
 import uptane.common # for canonical key construction and signing
 import uptane.clients.secondary as secondary
 from uptane import GREEN, RED, YELLOW, ENDCOLORS
+from demo.uptane_banners import *
 import tuf.keys
 import tuf.repository_tool as rt
 #import tuf.client.updater
@@ -279,9 +280,9 @@ def update_cycle():
   try:
     secondary_ecu.validate_time_attestation(time_attestation)
   except uptane.BadTimeAttestation as e:
-    print(YELLOW + "Timeserver attestation from Primary does not check out: "
+    print("Timeserver attestation from Primary does not check out: "
         "This Secondary's nonce was not found. Not updating this Secondary's "
-        "time this cycle." + ENDCOLORS)
+        "time this cycle.")
   except tuf.BadSignatureError as e:
     print(RED + "Timeserver attestation from Primary did not check out. Bad "
         "signature. Not updating this Secondary's time." + ENDCOLORS)
@@ -313,19 +314,24 @@ def update_cycle():
   # flexibility.
 
   if len(secondary_ecu.validated_targets_for_this_ecu) == 0:
-    print(YELLOW + 'No validated targets were found. Either the Director '
+    print_banner(BANNER_NO_UPDATE_NEEDED, color=WHITE+BLACK_BG,
+        text='No validated targets were found. Either the Director '
         'did not instruct this ECU to install anything, or the target info '
-        'the Director provided could not be validated.' + ENDCOLORS)
+        'the Director provided could not be validated.')
+    time.sleep(2)
+    # print(YELLOW + 'No validated targets were found. Either the Director '
+    #     'did not instruct this ECU to install anything, or the target info '
+    #     'the Director provided could not be validated.' + ENDCOLORS)
     generate_signed_ecu_manifest()
     submit_ecu_manifest_to_primary()
     return
 
 
-  elif len(secondary_ecu.validated_targets_for_this_ecu) > 1:
-    assert False, 'Multiple targets for an ECU not supported in this demo.'
+  #elif len(secondary_ecu.validated_targets_for_this_ecu) > 1:
+  #  assert False, 'Multiple targets for an ECU not supported in this demo.'
 
 
-  expected_target_info = secondary_ecu.validated_targets_for_this_ecu[0]
+  expected_target_info = secondary_ecu.validated_targets_for_this_ecu[-1]
 
   expected_image_fname = expected_target_info['filepath']
   if expected_image_fname[0] == '/':
@@ -337,7 +343,11 @@ def update_cycle():
   # TODO: <~> Cross-check this: we have the metadata now, so we and the Primary
   # should agree on whether or not there is an image to download.
   if not pserver.update_exists_for_ecu(secondary_ecu.ecu_serial):
-    print(YELLOW + 'Primary reports that there is no update for this ECU.')
+
+    print_banner(BANNER_NO_UPDATE, color=WHITE+BLACK_BG,
+        text='Primary reports that there is no update for this ECU.')
+    time.sleep(2)
+    # print(YELLOW + 'Primary reports that there is no update for this ECU.')
     (image_fname, image) = pserver.get_image(secondary_ecu.ecu_serial)
     generate_signed_ecu_manifest()
     submit_ecu_manifest_to_primary()
@@ -401,6 +411,16 @@ def update_cycle():
 
 
 
+  if secondary_ecu.firmware_fileinfo == expected_target_info:
+    print_banner(
+      BANNER_NO_UPDATE_NEEDED, color=WHITE+BLACK_BG,
+      text='We already have installed the firmware that the Director wants us '
+          'to install. Image: ' + repr(image_fname))
+    generate_signed_ecu_manifest()
+    submit_ecu_manifest_to_primary()
+    time.sleep(5)
+    return
+
   # Simulate installation. (If the demo eventually uses pictures to move into
   # place or something, here is where to do it.)
   # 1. Move the downloaded image from the unverified targets subdirectory to
@@ -416,8 +436,14 @@ def update_cycle():
   secondary_ecu.firmware_fileinfo = expected_target_info
 
 
-  print(GREEN + 'Installed firmware received from Primary that was fully '
-      'validated by the Director and OEM Repo.' + ENDCOLORS)
+  print_banner(
+      BANNER_UPDATED, color=WHITE+GREEN_BG,
+      text='Installed firmware received from Primary that was fully '
+      'validated by the Director and OEM Repo. Image: ' + repr(image_fname),
+      sound=WON)
+  time.sleep(10)
+  #print(GREEN + 'Installed firmware received from Primary that was fully '
+  #    'validated by the Director and OEM Repo.' + ENDCOLORS)
 
   if expected_target_info['filepath'].endswith('.txt'):
     print('The contents of the newly-installed firmware with filename ' +
@@ -578,5 +604,21 @@ def enforce_jail(fname, expected_containing_dir):
         repr(expected_containing_dir) + '. When appending ' + repr(fname) +
         ' to the given directory, the result was not in the given directory.')
 
-  else: 
+  else:
     return abs_fname
+
+
+
+
+def try_banners():
+  preview_all_banners()
+
+
+def looping_update():
+  while True:
+    try:
+      update_cycle()
+    except Exception as e:
+      print(repr(e))
+      pass
+    time.sleep(2)
